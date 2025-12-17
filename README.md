@@ -183,7 +183,7 @@ struct AAAA__fuzzland_move_bug has drop, copy, store {
 ### case 1
 Bug.sol 定义了一个简单的合约，其中函数 check(int a) 在 a 等于 1337 时触发断言失败。
 
-```json
+```c
 pragma solidity ^0.8.0;
 
 contract Bug {
@@ -210,7 +210,7 @@ ItyFuzz 在部署合约后，对 check(int) 函数的参数进行随机模糊测
 Overflow.sol 定义了一个简单的合约，其中函数 add(uint8 value) 会对内部 counter 累加。
 由于 counter 是 uint8 类型，超过 255 会发生整数溢出。
 
-```json
+```c
 pragma solidity ^0.8.0;
 
 contract Overflow {
