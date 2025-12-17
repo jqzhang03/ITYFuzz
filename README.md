@@ -178,3 +178,183 @@ struct AAAA__fuzzland_move_bug has drop, copy, store {
     event::emit(AAAA__fuzzland_move_bug { info: 1 });
 ...
 ```
+
+### 案例研究
+### case 1
+Bug.sol 定义了一个简单的合约，其中函数 check(int a) 在 a 等于 1337 时触发断言失败。
+
+```json
+pragma solidity ^0.8.0;
+
+contract Bug {
+    function check(int a) public pure {
+        if (a == 1337) {
+            assert(false);
+        }
+    }
+}
+```
+![alt text](public/image.png)
+ItyFuzz 在部署合约后，对 check(int) 函数的参数进行随机模糊测试。
+
+起初，Fuzzer 使用随机的大整数作为输入，函数正常执行，用于探索代码路径并建立覆盖率。
+
+随后，在不断基于覆盖率反馈变异参数的过程中，Fuzzer 生成了输入 1337，
+命中条件判断并触发 assert(false)，导致交易回滚并返回断言失败错误码 0x4e487b71。
+
+该异常执行被自动记录为新的测试用例，覆盖率明显提升，表明该输入成功触达了隐藏的错误路径。
+
+该 case 表明 ItyFuzz 能够在无人工引导的情况下，自动发现由特定输入触发的逻辑漏洞，并生成可复现的触发用例。
+
+### Case 2
+Overflow.sol 定义了一个简单的合约，其中函数 add(uint8 value) 会对内部 counter 累加。
+由于 counter 是 uint8 类型，超过 255 会发生整数溢出。
+
+```json
+pragma solidity ^0.8.0;
+
+contract Overflow {
+    uint8 public counter = 0;
+
+    function add(uint8 value) public {
+        counter += value; // 可能溢出
+        assert(counter >= value); // 断言检测溢出
+    }
+}
+```
+合约被编译为 EVM 字节码并作为 ItyFuzz 的输入目标。
+ItyFuzz 自动部署合约，并对 add 函数的参数进行模糊测试。
+
+ItyFuzz 在启动后首先自动部署目标合约 Bug，并枚举其可调用的公共函数 check(int) 作为模糊测试入口。
+![alt text](public/image-2.png)
+ItyFuzz 在部署合约后，对 add(uint256) 函数进行参数与调用序列的模糊测试。
+
+首先，Fuzzer 生成小整数输入（如 add(1)、add(100)），用于初始化状态变量 x 并探索正常执行路径。
+
+在覆盖率反馈的引导下，Fuzzer 自动组合多次函数调用，逐步累积 x 的值，形成状态相关的调用序列。
+
+当连续调用导致 x 在 unchecked 块中发生整数回绕（wrap-around）时，条件 x < a 成立，触发 assert(false)，交易回滚并返回 panic 错误码 0x4e487b71。
+
+该异常执行路径被记录为新的测试用例，表明 ItyFuzz 成功发现了依赖多次状态更新才能触发的整数溢出漏洞。该 case 表明 ItyFuzz 能够自动探索整数边界条件，发现隐蔽的溢出漏洞。
+
+### Case 3
+StateBug.sol 定义了一个带有状态依赖逻辑的合约，其中 inc(uint256 x) 用于累加内部变量 counter，并在其超过阈值时进入危险状态 armed。
+在 armed 状态下，reset(uint256 x) 可以将 counter 重置为一个较小的值。
+当合约同时满足 armed == true 且 counter == 7 时，调用 check() 将触发断言失败，从而暴露一个需要跨多次调用才能触发的隐藏状态漏洞。
+
+```c
+pragma solidity ^0.8.0;
+
+contract StateBug {
+    uint256 public counter;
+    bool public armed;
+
+    function inc(uint256 x) public {
+        // 正常状态推进
+        counter += x;
+
+        // 当 counter 足够大时，进入“危险状态”
+        if (counter > 1000) {
+            armed = true;
+        }
+    }
+
+    function reset(uint256 x) public {
+        // 只有在 armed 状态下才允许 reset
+        if (armed && x < 10) {
+            counter = x;
+        }
+    }
+
+    function check() public view {
+        // 隐藏漏洞：需要特定状态组合
+        if (armed && counter == 7) {
+            assert(false);
+        }
+    }
+}
+```
+
+
+**第一段：状态建模与初始状态探索**
+
+![alt text](public/image-3.png)
+ITYFuzz 在分析该合约时，并不是把每个函数调用当作孤立事件，而是将合约建模为一个 有状态系统（stateful contract）。
+在这个模型中：
+- counter 和 armed 构成了合约的核心状态
+- inc 和 reset 被视为 状态转移函数
+
+不同交易序列会导致不同的状态组合
+
+例如：
+- inc(x) 会改变 counter，并在 counter > 1000 时将 armed 置为 true
+- reset(x) 的执行效果依赖于 之前是否已经进入 armed 状态
+
+因此，fuzzer 的目标不只是“让函数跑一遍”，而是通过**多笔交易组合**探索合约可能达到的所有状态空间。
+
+
+**第二段：状态反馈驱动的状态推进**
+
+![alt text](public/image-5.png)
+在 fuzzing 过程中，ITYFuzz 会记录每次执行后的合约状态和分支覆盖情况，并将能够引发新状态或新分支的交易序列加入 corpus。
+
+小参数的 inc(x)
+→ counter 增长有限，armed 仍为 false
+→ 状态变化较少，但用于构建初始 corpus
+
+大参数的 inc(x)
+→ counter > 1000 分支被触发
+→ armed 从 false 变为 true（这是一个新的关键状态）
+
+一旦 armed == true 被覆盖，后续的 fuzzing 就会优先围绕该状态继续变异输入，例如：
+- 尝试不同的 reset(x)
+- 尝试在该状态下调用只读函数 check()
+
+它们并非随机噪声，而是为了尽快跨越状态阈值。
+
+
+**第三段：跨交易状态组合，触发隐藏断言**
+
+![alt text](public/image-6.png)
+
+Fuzzer 在 armed 状态下发现：
+```c
+function reset(uint256 x) public {
+    if (armed && x < 10) {
+        counter = x;
+    }
+}
+```
+于是它开始系统性探索：
+- armed == true
+- 尝试各种 x < 10
+- 将 counter 精确写成小值（0, 7, 8, …）
+
+这一步非常关键，因为这是 单次调用 fuzzer 永远无法做到的事
+
+当 fuzzer 构造出：
+```c
+inc(large) → armed = true
+reset(7)   → counter = 7
+```
+
+随后再调用：
+```c
+check()
+```
+
+就会命中：
+```c
+if (armed && counter == 7) {
+    assert(false);
+}
+```
+
+对应 EVM panic：0x4e487b71
+
+| Fuzzing 阶段 | 日志表现           | 对应机制                 |
+| ---------- | -------------- | -------------------- |
+| 初始建模       | 单次 `inc(x)`    | 识别状态变量与转移函数          |
+| 状态推进       | 巨大 `inc(x)`    | 覆盖 `armed = true` 分支 |
+| 状态组合       | `inc → reset`  | 构造跨交易状态              |
+| 漏洞触发       | revert / panic | 断言失败被识别              |
