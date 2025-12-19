@@ -358,3 +358,101 @@ if (armed && counter == 7) {
 | 状态推进       | 巨大 `inc(x)`    | 覆盖 `armed = true` 分支 |
 | 状态组合       | `inc → reset`  | 构造跨交易状态              |
 | 漏洞触发       | revert / panic | 断言失败被识别              |
+
+### Case 4
+本案例复现的是 Parity 多签钱包历史漏洞（Library Selfdestruct Bug）的一个最小可 fuzz 版本。该漏洞源于 Wallet 合约通过 delegatecall 调用 Library 合约中的逻辑，
+而 Library 中的初始化函数和销毁函数缺乏足够的访问控制，
+攻击者可以直接操作 Library 合约本身，进而触发自毁。
+
+
+
+```c
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.10;
+
+/*
+ * Minimal reproducer of Parity Multisig Wallet bug (2017)
+ *
+ * Key properties:
+ * 1. Library has an unprotected init()
+ * 2. Wallet uses delegatecall to Library
+ * 3. Library has kill() guarded by owner
+ * 4. Attacker can become owner, then selfdestruct logic
+ */
+
+contract WalletLibrary {
+    address public owner;
+    bool public initialized;
+
+    // ❌ 漏洞点 1：可被任意人重复调用
+    function init(address _owner) external {
+        require(!initialized, "already initialized");
+        owner = _owner;
+        initialized = true;
+    }
+
+    function kill() external {
+        require(msg.sender == owner, "not owner");
+        selfdestruct(payable(msg.sender));
+    }
+}
+
+contract Wallet {
+    address public owner;          // storage slot 0
+    bool public initialized;       // storage slot 1
+
+    address public lib;
+
+    constructor(address _lib) {
+        lib = _lib;
+    }
+
+    fallback() external payable {
+        // ❌ 漏洞点 2：delegatecall 到可初始化的 library
+        (bool ok, ) = lib.delegatecall(msg.data);
+        require(ok, "delegatecall failed");
+    }
+}
+```
+### 合约结构
+
+目标合约包含两个部分：
+
+1) Wallet 合约  
+   - 作为主合约部署
+   - 将函数调用通过 delegatecall 转发到 Library
+
+2) WalletLibrary 合约  
+   - 包含 init(address) 初始化函数
+   - 包含 kill() 自毁函数
+   - 维护 owner 状态
+
+Library 合约本应只作为逻辑库使用，
+但其函数可以被直接调用。
+
+
+### 漏洞触发条件
+漏洞触发需要满足以下状态条件：
+
+1) Library 合约尚未被正确初始化
+2) 攻击者调用 Library.init(attacker)
+   → attacker 成为 owner
+3) 攻击者随后调用 Library.kill()
+   → 合约触发 selfdestruct
+
+
+### ItyFuzz 发现过程
+
+![alt text](public/image-7.png)
+![alt text](public/image-8.png)
+ItyFuzz 在 fuzz 过程中自动完成了以下步骤：
+
+1) 部署 Wallet 与 WalletLibrary 合约
+2) 枚举并调用公开函数 init(...)
+3) 生成不同的地址参数作为 init 的输入
+4) 成功将 Library.owner 设置为 fuzz 生成的地址
+5) 继续探索状态相关路径，调用 kill()
+6) 触发 selfdestruct 指令
+
+
+
