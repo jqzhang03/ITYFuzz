@@ -1,5 +1,14 @@
 # ITYFuzz
 
+## 小组分工
+
+复现项目、制作案例：张锦淇、万杰
+PPT与讲稿制作：金俊辉、余畅
+上台演讲：葛春灿
+
+#### 声明
+由于该论文实验是在128核心AMD Epyc CPUs以及256GB内存上运行的，鉴于当前没有如此设备，而且是在虚拟机上跑，因此没有使用文中的案例进行实验，而是使用小样例对工具进行测试和分析。
+
 ## 环境配置
 
 ||操作系统|Rust|Solidity|Node|ITYFuzz|
@@ -180,6 +189,7 @@ struct AAAA__fuzzland_move_bug has drop, copy, store {
 ```
 
 ### 案例研究
+
 ### case 1
 Bug.sol 定义了一个简单的合约，其中函数 check(int a) 在 a 等于 1337 时触发断言失败。
 
